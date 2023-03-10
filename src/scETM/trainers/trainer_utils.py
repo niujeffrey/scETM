@@ -117,6 +117,27 @@ def train_test_split(
     return train_adata, test_adata
 
 
+def train_test_split_cite(
+    adata_gene: anndata.AnnData,
+    adata_protein: anndata.AnnData,
+    test_ratio: float = 0.1,
+    seed: int = 1
+) -> Tuple[anndata.AnnData, anndata.AnnData]:
+    """
+    Like train_test_split, but splits both adatas
+    """
+    
+    rng = np.random.default_rng(seed=seed)
+    test_indices = rng.choice(adata_gene.n_obs, size=int(test_ratio * adata_gene.n_obs), replace=False)
+    train_indices = list(set(range(adata_gene.n_obs)).difference(test_indices))
+    train_adata_gene = adata_gene[adata_gene.obs_names[train_indices], :]
+    train_adata_protein = adata_protein[adata_gene.obs_names[train_indices], :]
+    test_adata_gene = adata_gene[adata_gene.obs_names[test_indices], :]
+    test_adata_protein = adata_protein[adata_gene.obs_names[test_indices], :]
+    _logger.info(f'Keeping {test_adata_gene.n_obs} cells ({test_ratio:g}) as test data.')
+    return train_adata_gene, test_adata_gene, train_adata_protein, test_adata_protein
+
+
 @log_arguments
 def prepare_for_transfer(
     model: scETM,

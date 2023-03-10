@@ -51,12 +51,6 @@ class scETM(BaseCellModel):
         enable_batch_bias: whether to add a batch-specific bias at decoding.
             If normalize_beta, this attribute is ignored.
         enable_global_bias: whether to add a global bias at decoding.
-        q_delta: the shared part of the scETM encoder.
-        mu_q_delta: the final layer of the scETM encoder predicting the mean of
-            the unnormalized latent topic proportions (delta).
-        logsigma_q_delta: the final layer of the scETM encoder predicting the
-            log of the standard deviation of the unnormalized latent topic
-            proportions (delta).
         rho_fixed_emb: part of the gene embedding matrix (rho) with shape
             [L_fixed, G], where everything is fixed. This could be a pathway-
             gene matrix.
@@ -68,6 +62,24 @@ class scETM(BaseCellModel):
             is True.
         global_bias: the global bias. Only present if enable_global_bias is
             True.
+
+    Modified attributes:
+        q_delta_gene: the shared part of the scETM encoder (gene expression).
+        mu_q_delta_gene: the final layer of the scETM encoder predicting the mean of
+            the unnormalized latent topic proportions (gene) (delta).
+        logsigma_q_delta_gene: the final layer of the scETM encoder predicting the
+            log of the standard deviation of the unnormalized latent topic
+            proportions (gene) (delta).
+
+    New attributes:
+        n_trainable_proteins: Number of trainable proteins
+        q_delta_protein: the shared part of the scETM encoder (protein expression)
+        mu_q_delta_protein: the final layer of the scETM encoder predicting the mean
+            of the unnormalized latent topic proportions (protein) (delta)
+        logsigma_q_delta_protein: the final layer of the scETM encoder predicting the
+            log of the standard deviation of the unnormalized latent topic
+            proportions (protein) (delta)
+        
     """
 
     clustering_input: str = "delta"
@@ -78,6 +90,7 @@ class scETM(BaseCellModel):
     @log_arguments
     def __init__(self,
         n_trainable_genes: int,
+        n_trainable_proteins: int,
         n_batches: int,
         n_fixed_genes: int = 0,
         n_topics: int = 50,
@@ -100,6 +113,7 @@ class scETM(BaseCellModel):
         Args:
             n_trainable_genes: number of trainable genes.
             n_batches: number of batches in the dataset.
+            n_genes: number of genes in the AnnData object. The rest are proteins.
             n_fixed_genes: number of fixed_genes. Parameters in the input and
                 output layer related to these genes should be fixed. Useful for
                 the fine-tuning stage in transfer learning.
@@ -128,9 +142,10 @@ class scETM(BaseCellModel):
             device: device to store the model parameters.
         """
 
-        super().__init__(n_trainable_genes, n_batches, n_fixed_genes, need_batch=n_batches > 1 and (input_batch_id or enable_batch_bias), device=device)
+        super().__init__(n_trainable_genes + n_trainable_proteins, n_batches, n_fixed_genes, need_batch=n_batches > 1 and (input_batch_id or enable_batch_bias), device=device)
 
         self.n_topics: int = n_topics
+        self.n_trainable_proteins: int = n_trainable_proteins
         self.trainable_gene_emb_dim: int = trainable_gene_emb_dim
         self.hidden_sizes: Sequence[int] = hidden_sizes
         self.bn: bool = bn
@@ -146,7 +161,7 @@ class scETM(BaseCellModel):
             self.enable_batch_bias = False
             self.input_batch_id = False
 
-        self.q_delta: nn.Sequential = get_fully_connected_layers(
+        self.q_delta_gene: nn.Sequential = get_fully_connected_layers(
             n_trainable_input=self.n_trainable_genes + ((self.n_batches - 1) if self.input_batch_id else 0),
             hidden_sizes=self.hidden_sizes,
             bn=self.bn,
@@ -154,8 +169,17 @@ class scETM(BaseCellModel):
             n_fixed_input=self.n_fixed_genes
         )
         hidden_dim = self.hidden_sizes[-1]
-        self.mu_q_delta: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
-        self.logsigma_q_delta: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
+        self.mu_q_delta_gene: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
+        self.logsigma_q_delta_gene: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
+
+        self.q_delta_protein: nn.Sequential = get_fully_connected_layers(
+            n_trainable_input=self.n_trainable_proteins + ((self.n_batches - 1) if self.input_batch_id else 0),
+            hidden_sizes = self.hidden_sizes,
+            bn=self.bn,
+            dropout_prob=self.dropout_prob
+        )
+        self.mu_q_delta_protein: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
+        self.logsigma_q_delta_protein: nn.Linear = nn.Linear(hidden_dim, self.n_topics, bias=True)
 
         self.rho_fixed_emb: Union[None, torch.Tensor] = None
         self.rho_trainable_emb: Union[None, PartlyTrainableParameter2D] = None
@@ -189,25 +213,27 @@ class scETM(BaseCellModel):
         attributes.
         """
 
-        trainable_dim = self.n_trainable_genes + ((self.n_batches - 1) if self.input_batch_id else 0)
+        trainable_dim_genes = self.n_trainable_genes + ((self.n_batches - 1) if self.input_batch_id else 0)
+        trainable_dim_proteins = self.n_trainable_proteins + ((self.n_batches - 1) if self.input_batch_id else 0)
         if self.n_fixed_genes > 0:
-            self.q_delta[0] = InputPartlyTrainableLinear(self.n_fixed_genes, self.hidden_sizes[0], trainable_dim)
+            self.q_delta_gene[0] = InputPartlyTrainableLinear(self.n_fixed_genes, self.hidden_sizes[0], trainable_dim_genes)
         else:
-            self.q_delta[0] = nn.Linear(trainable_dim, self.hidden_sizes[0])
+            self.q_delta_gene[0] = nn.Linear(trainable_dim, self.hidden_sizes[0])
+        self.q_delta_protein[0] = nn.Linear(trainable_dim_proteins, self.hidden_sizes[0])
 
     def _init_rho_trainable_emb(self) -> None:
         """Initializes self.rho_trainable_emb given the constant attributes."""
 
         if self.trainable_gene_emb_dim > 0:
-            self.rho_trainable_emb = PartlyTrainableParameter2D(self.trainable_gene_emb_dim, self.n_fixed_genes, self.n_trainable_genes)
+            self.rho_trainable_emb = PartlyTrainableParameter2D(self.trainable_gene_emb_dim, self.n_fixed_genes, self.n_trainable_genes + self.n_trainable_proteins)
 
     def _init_batch_and_global_biases(self) -> None:
         """Initializes batch and global biases given the constant attributes."""
 
         if self.enable_batch_bias:
-            self.batch_bias: nn.Parameter = nn.Parameter(torch.randn(self.n_batches, self.n_fixed_genes + self.n_trainable_genes))
+            self.batch_bias: nn.Parameter = nn.Parameter(torch.randn(self.n_batches, self.n_fixed_genes + self.n_trainable_genes + self.n_trainable_proteins))
         
-        self.global_bias: nn.Parameter = nn.Parameter(torch.randn(1, self.n_fixed_genes + self.n_trainable_genes)) if self.enable_global_bias else None
+        self.global_bias: nn.Parameter = nn.Parameter(torch.randn(1, self.n_fixed_genes + self.n_trainable_genes + self.n_trainable_proteins)) if self.enable_global_bias else None
 
     def decode(self,
         theta: torch.Tensor,
@@ -257,25 +283,29 @@ class scETM(BaseCellModel):
         """
 
         cells, library_size = data_dict['cells'], data_dict['library_size']
+        cells_gene, cells_protein = cells[,: self.n_trainable_genes + self.n_fixed_genes], cells[, self.n_trainable_genes + self.n_fixed_genes:]
+        library_size_gene = library_size[,: self.n_trainable_genes + self.n_fixed_genes], library_size[, self.n_trainable_genes + self.n_fixed_genes:]
         normed_cells = cells / library_size
         input_cells = normed_cells if self.norm_cells else cells
         if self.input_batch_id:
             input_cells = torch.cat((input_cells, self._get_batch_indices_oh(data_dict)), dim=1)
         
-        q_delta = self.q_delta(input_cells)
-        mu_q_delta = self.mu_q_delta(q_delta)
-        logsigma_q_delta = self.logsigma_q_delta(q_delta).clamp(self.min_logsigma, self.max_logsigma)
-        q_delta = Independent(Normal(
-            loc=mu_q_delta,
-            scale=logsigma_q_delta.exp()
+        q_delta_gene = self.q_delta_gene(input_cells)
+        mu_q_delta_gene = self.mu_q_delta_gene(q_delta_gene)
+        logsigma_q_delta_gene = self.logsigma_q_delta_gene(q_delta_gene).clamp(self.min_logsigma, self.max_logsigma)
+        q_delta_gene = Independent(Normal(
+            loc=mu_q_delta_gene,
+            scale=logsigma_q_delta_gene.exp()
         ), 1)
 
-        delta = q_delta.rsample()
-        theta = F.softmax(delta, dim=-1)  # [batch_size, n_topics]
+        delta_gene = q_delta_gene.rsample()
+        theta_gene = F.softmax(delta, dim=-1)  # [batch_size, n_topics]
+
+        q_delta_protein = self.q_delta_protein()
 
         if not self.training:
-            theta = F.softmax(mu_q_delta, dim=-1)
-            fwd_dict = dict(theta=theta, delta=mu_q_delta)
+            theta = F.softmax(mu_q_delta_gene, dim=-1)
+            fwd_dict = dict(theta=theta, delta=mu_q_delta_gene)
             if 'decode' in hyper_param_dict and hyper_param_dict['decode']:
                 recon_log = self.decode(theta, data_dict.get('batch_indices', None))
                 fwd_dict['recon_log'] = recon_log
@@ -285,7 +315,7 @@ class scETM(BaseCellModel):
         recon_log = self.decode(theta, data_dict.get('batch_indices', None))
 
         nll = (-recon_log * normed_cells if self.normed_loss else cells).sum(-1).mean()
-        kl_delta = get_kl(mu_q_delta, logsigma_q_delta).mean()
+        kl_delta = get_kl(mu_q_delta_gene, logsigma_q_delta_gene).mean()
         loss = nll + hyper_param_dict['kl_weight'] * kl_delta
         record = dict(loss=loss, nll=nll, kl_delta=kl_delta)
 
