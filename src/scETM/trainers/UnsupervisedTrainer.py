@@ -12,10 +12,10 @@ import torch
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 
-from scETM.batch_sampler import CellSampler, MultithreadedCellSampler
-from scETM.eval_utils import evaluate
-from scETM.models import BaseCellModel, scETM
-from scETM.logging_utils import initialize_logger, log_arguments
+from batch_sampler import CellSampler, MultithreadedCellSampler
+from eval_utils import evaluate
+from models import BaseCellModel, scETM
+from logging_utils import initialize_logger, log_arguments
 from .trainer_utils import train_test_split, set_seed, _stats_recorder
 
 _logger = logging.getLogger(__name__)

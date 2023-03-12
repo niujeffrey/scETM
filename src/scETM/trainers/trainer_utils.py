@@ -12,8 +12,8 @@ import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from scETM.models import scETM
-from scETM.logging_utils import log_arguments
+from models import scETM
+from logging_utils import log_arguments
 
 _logger = logging.getLogger(__name__)
 

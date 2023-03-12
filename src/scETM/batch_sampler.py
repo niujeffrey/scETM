@@ -154,6 +154,175 @@ class CellSampler():
             yield result_dict
 
 
+class CellSamplerCITE():
+    """An iterable cell dataset for minibatch sampling.
+
+    Attributes:
+        n_cells: number of cells in the dataset.
+        batch_size: size of each sampled minibatch.
+        n_epochs: number of epochs to sample before raising StopIteration.
+        X_gene: a (dense or sparse) matrix containing the cell-gene matrix.
+        X_protein: a (dense or sparse) matrix containing the cell-protein matrix.
+        is_sparse: whether self.X is a sparse matrix.
+        shuffle: whether to shuffle the dataset at the beginning of each epoch.
+            When n_cells >= batch_size, this attribute is ignored.
+        rng: the random number generator. Could be None if shuffle is False.
+        library_size_gene: a (dense or sparse) vector storing the gene library size for
+            each cell.
+        library_size_protein: a (dense or sparse) vector storing the protein library
+            size for each cell.
+        sample_batch_id: whether to yield batch indices in each sample.
+        batch_indices: a (dense or sparse) vector storing the batch indices
+            for each cell. Only present if sample_batch_id is True.
+    """
+
+    def __init__(self,
+        adata_gene: anndata.AnnData,
+        adata_protein: anndata.AnnData,
+        batch_size: int,
+        sample_batch_id: bool = False,
+        n_epochs: Union[float, int] = np.inf,
+        rng: Union[None, np.random.Generator] = None,
+        batch_col: str = 'batch_indices',
+        shuffle: bool = True
+    ) -> None:
+        """Initializes the CellSampler object.
+
+        Args:
+            adata_gene: an AnnData object storing the scRNA-seq dataset.
+            adata_protein: an AnnData object storing the protein dataset.
+            batch_size: size of each sampled minibatch.
+            sample_batch_id: whether to yield batch indices in each sample.
+            n_epochs: number of epochs to sample before raising StopIteration.
+            rng: the random number generator.
+                Could be None if shuffle is False.
+            batch_col: a key in adata.obs to the batch column. Only used when
+                sample_batch_id is True.
+            shuffle: whether to shuffle the dataset at the beginning of each
+                epoch. When n_cells >= batch_size, this attribute is ignored.
+        
+        Assumption that adata_gene and adata_protein have the same cells in the same order.
+        """
+
+        self.n_cells: int = adata_gene.n_obs
+        self.batch_size: int = batch_size
+        self.n_epochs: Union[int, float] = n_epochs
+        self.is_sparse: bool = isinstance(adata_gene.X, spmatrix)
+        self.X_gene: Union[np.ndarray, spmatrix] = adata_gene.X
+        self.X_protein: Union[np.ndarray, spmatrix] = adata_protein.X
+        if shuffle:
+            self.rng: Union[None, np.random.Generator] = rng or np.random.default_rng()
+        else:
+            self.rng: Union[None, np.random.Generator] = None
+        self.shuffle: bool = shuffle
+        if self.is_sparse:
+            self.library_size_gene: Union[spmatrix, np.ndarray] = adata_gene.X.sum(1)
+            self.library_size_protein: Union[spmatrix, np.ndarray] = adata_protein.X.sum(1)
+        else:
+            self.library_size_gene: Union[spmatrix, np.ndarray] = adata_gene.X.sum(1, keepdims=True)
+            self.library_size_protein: Union[spmatrix, np.ndarray] = adata_protein.X.sum(1, keepdims=True)
+
+        self.sample_batch_id: bool = sample_batch_id
+        if self.sample_batch_id:
+            assert batch_col in adata_gene.obs, f'{batch_col} not in adata.obs'
+            self.batch_indices: pd.Series = adata_gene.obs[batch_col].astype('category').cat.codes
+            
+    def __iter__(self) -> Iterator[Mapping[str, torch.Tensor]]:
+        """Creates an iterator.
+
+        If self.n_cells <= self.batch_size, simply returns the whole batch for
+        self.n_epochs times.
+        Otherwise, randomly or sequentially (depending on self.shuffle) sample
+        minibatches of size self.batch_size.
+
+        Yields:
+            A dict mapping tensor names to tensors. The returned tensors
+            include (B for batch_size, G for #genes):
+                * X_gene: the cell-gene matrix of shape [B, G].
+                * X_protein: the cell-protein matrix of shape [B, P]
+                * library_size: total #genes for each cell [B].
+                * cell_indices: the cell indices in the original dataset [B].
+                * batch_indices (optional): the batch indices of each cell [B].
+                    Is only returned if self.sample_batch_id is True.
+        """
+
+        if self.batch_size < self.n_cells:
+            return self._low_batch_size()
+        else:
+            return self._high_batch_size()
+
+    def _high_batch_size(self) -> Iterator[Mapping[str, torch.Tensor]]:
+        """The iterator for the high batch size case.
+
+        Simply returns the whole batch for self.n_epochs times.
+        """
+
+        count = 0
+        X_gene = torch.FloatTensor(self.X_gene.todense() if self.is_sparse else self.X_gene)
+        X_protein = torch.FloatTensor(self.X_protein.todense() if self.is_sparse else self.X_protein)
+        library_size_gene = torch.FloatTensor(self.library_size_gene)
+        library_size_protein = torch.FloatTensor(self.library_size_protein)
+        cell_indices = torch.arange(0, self.n_cells, dtype=torch.long)
+        result_dict = dict(cells_gene=X_gene, cells_protein=X_protein,
+                        library_size_gene=library_size_gene,
+                        library_size_protein=library_size_protein,
+                        cell_indices=cell_indices)
+        if self.sample_batch_id:
+            result_dict['batch_indices'] = torch.LongTensor(self.batch_indices)
+        while count < self.n_epochs:
+            count += 1
+            yield result_dict
+
+    def _low_batch_size(self) -> Iterator[Mapping[str, torch.Tensor]]:
+        """The iterator for the low batch size case.
+
+        Randomly or sequentially (depending on self.shuffle) sample minibatches
+        of size self.batch_size.
+        """
+
+        entry_index = 0
+        count = 0
+        cell_range = np.arange(self.n_cells)
+        if self.shuffle:
+            self.rng.shuffle(cell_range)
+        while count < self.n_epochs:
+            if entry_index + self.batch_size >= self.n_cells:
+                count += 1
+                batch = cell_range[entry_index:]
+                if self.shuffle:
+                    self.rng.shuffle(cell_range)
+                excess = entry_index + self.batch_size - self.n_cells
+                if excess > 0 and count < self.n_epochs:
+                    batch = np.append(batch, cell_range[:excess], axis=0)
+                    entry_index = excess
+                else:
+                    entry_index = 0
+            else:
+                batch = cell_range[entry_index: entry_index + self.batch_size]
+                entry_index += self.batch_size
+
+            library_size_gene = torch.FloatTensor(self.library_size_gene[batch])
+            library_size_protein = torch.FloatTensor(self.library_size_protein[batch])
+            X_gene = self.X_gene[batch, :]
+            X_protein = self.X_protein[batch, :]
+            if self.is_sparse:
+                # X = X.tocoo()
+                # cells = torch.sparse.FloatTensor(torch.LongTensor([X.row, X.col]), torch.FloatTensor(X.data), X.shape)
+                cells_gene = torch.FloatTensor(X_gene.todense())
+                cells_protein = torch.FloatTensor(X_protein.todense())
+            else:
+                cells_gene = torch.FloatTensor(X_gene)
+                cells_protein = torch.FloatTensor(X_protein)
+            cell_indices = torch.LongTensor(batch)
+            result_dict = dict(cells_gene=cells_gene, cells_protein=cells_protein,
+                        library_size_gene=library_size_gene,
+                        library_size_protein=library_size_protein,
+                        cell_indices=cell_indices)
+            if self.sample_batch_id:
+                result_dict['batch_indices'] = torch.LongTensor(self.batch_indices[batch])
+            yield result_dict
+
+
 class ThreadedCellSampler(threading.Thread):
     """A wrapped cell sampler for multi-threaded minibatch sampling.
 

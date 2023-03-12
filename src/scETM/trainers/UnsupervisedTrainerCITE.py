@@ -12,16 +12,16 @@ import torch
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
 
-from scETM.batch_sampler import CellSampler, MultithreadedCellSampler
-from scETM.eval_utils import evaluate
-from scETM.models import BaseCellModel, scETM
-from scETM.logging_utils import initialize_logger, log_arguments
+from batch_sampler import CellSampler, CellSamplerCITE, MultithreadedCellSampler
+from eval_utils import evaluate
+from models import BaseCellModel, scETM
+from logging_utils import initialize_logger, log_arguments
 from .trainer_utils import train_test_split, train_test_split_cite, set_seed, _stats_recorder
 
 _logger = logging.getLogger(__name__)
 
 
-class UnsupervisedTrainer:
+class UnsupervisedTrainerCITE:
     """Unsupervised trainer for single-cell modeling.
 
     Sets up the random seed, dataset split, optimizer and logger, and executes
@@ -69,7 +69,7 @@ class UnsupervisedTrainer:
         init_lr: float = 5e-3,
         lr_decay: float = 6e-5,
         batch_size: int = 2000,
-        train_instance_name: str = "scETM",
+        train_instance_name: str = "multiETM",
         restore_epoch: int = 0,
         seed: int = -1,
     ) -> None:
@@ -103,13 +103,14 @@ class UnsupervisedTrainer:
         self.train_adata_gene = self.test_adata_gene = self.adata_gene = adata_gene
         self.train_adata_protein = self.test_adata_protein = self.adata_protein = adata_protein
         if test_ratio > 0:
-            self.train_adata, self.test_adata = train_test_split(adata, test_ratio, seed=data_split_seed)
+            self.train_adata_gene, self.test_adata_gene, self.train_adata_protein, self.test_adata_protein = \
+                train_test_split_cite(adata_gene, adata_protein, test_ratio, seed=data_split_seed)
         
         self.optimizer = optim.Adam(self.model.parameters(), lr=init_lr)
         self.lr = self.init_lr = init_lr
         self.lr_decay = lr_decay
         self.batch_size = batch_size
-        self.steps_per_epoch = max(self.train_adata.n_obs / self.batch_size, 1)
+        self.steps_per_epoch = max(self.train_adata_gene.n_obs / self.batch_size, 1)
         self.device = model.device
         self.step = self.epoch = 0
         self.seed = seed
@@ -255,14 +256,14 @@ class UnsupervisedTrainer:
         eval_kwargs = default_eval_kwargs
         
         # set up sampler and dataloader
-        if n_samplers == 1 or self.batch_size >= self.train_adata.n_obs:
-            sampler = CellSampler(self.train_adata, self.batch_size, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
+        if n_samplers == 1 or self.batch_size >= self.train_adata_gene.n_obs:
+            sampler = CellSamplerCITE(self.train_adata_gene, self.train_adata_protein, self.batch_size, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         else:
             sampler = MultithreadedCellSampler(self.train_adata, self.batch_size, n_samplers = n_samplers, sample_batch_id = self.model.need_batch, n_epochs = n_epochs - self.epoch, batch_col = batch_col)
         dataloader = iter(sampler)
         
         # set up the stats recorder
-        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata.obs)
+        recorder = _stats_recorder(record_log_path=record_log_path, writer=writer, metadata=self.adata_gene.obs)
         next_ckpt_epoch = min(int(np.ceil(self.epoch / eval_every) * eval_every), n_epochs)
 
         while self.epoch < n_epochs:
@@ -290,8 +291,8 @@ class UnsupervisedTrainer:
 
                 # log statistics of tracked items
                 recorder.log_and_clear_record()
-                if self.test_adata is not self.adata:
-                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata, self.batch_size, batch_col=batch_col, emb_names=[])
+                if self.test_adata_gene is not self.adata_gene:
+                    test_nll = self.model.get_cell_embeddings_and_nll(self.test_adata_gene, self.test_adata_protein, self.batch_size, batch_col=batch_col, emb_names=[])
                     if test_nll is not None:
                         _logger.info(f'test nll: {test_nll:7.4f}')
                 else:
@@ -302,9 +303,9 @@ class UnsupervisedTrainer:
                     current_eval_kwargs = eval_kwargs.copy()
                     current_eval_kwargs['plot_fname'] = current_eval_kwargs['plot_fname'] + f'_epoch{int(next_ckpt_epoch)}'
                     self.before_eval(batch_col=batch_col)
-                    if isinstance(self.model, scETM):
-                        self.model.write_topic_gene_embeddings_to_tensorboard(writer, self.adata.var_names, f'gene_topic_emb_epoch{int(next_ckpt_epoch)}')
-                    result = evaluate(adata = self.adata, embedding_key = self.model.clustering_input, **current_eval_kwargs)
+                    # if isinstance(self.model, scETM):
+                        # self.model.write_topic_gene_embeddings_to_tensorboard(writer, self.adata.var_names, f'gene_topic_emb_epoch{int(next_ckpt_epoch)}')
+                    result = evaluate(adata = self.adata_gene, embedding_key = self.model.clustering_input, **current_eval_kwargs)
                     result['test_nll'] = test_nll
                     self._log_eval_result(result, next_ckpt_epoch, writer, eval_result_log_path)
 
@@ -373,5 +374,5 @@ class UnsupervisedTrainer:
         """Docstring (TODO)
         """
 
-        self.model.get_cell_embeddings_and_nll(self.adata, self.batch_size, batch_col=batch_col, emb_names=[self.model.clustering_input])
+        self.model.get_cell_embeddings_and_nll(self.adata_gene, self.adata_protein, self.batch_size, batch_col=batch_col, emb_names=[self.model.clustering_input])
 

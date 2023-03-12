@@ -1,4 +1,4 @@
-from typing import Any, Iterable, Mapping, Sequence, Tuple, Union
+from typing import Any, Callable, Iterable, Mapping, Sequence, Tuple, Union
 import anndata
 import numpy as np
 import logging
@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Normal, Independent
 
-from scETM.logging_utils import log_arguments
+from logging_utils import log_arguments
 from .BaseCellModel import BaseCellModel
 from .model_utils import (
     InputPartlyTrainableLinear,
@@ -17,10 +17,11 @@ from .model_utils import (
     get_fully_connected_layers,
     get_kl
 )
+from batch_sampler import CellSamplerCITE
 
 _logger = logging.getLogger(__name__)
 
-class scETM(BaseCellModel):
+class MultiETM(BaseCellModel):
     """Single-cell Embedded Topic Model.
 
     From paper "Learning interpretable cellular and gene signature
@@ -142,7 +143,7 @@ class scETM(BaseCellModel):
             device: device to store the model parameters.
         """
 
-        super().__init__(n_trainable_genes + n_trainable_proteins, n_batches, n_fixed_genes, need_batch=n_batches > 1 and (input_batch_id or enable_batch_bias), device=device)
+        super().__init__(n_trainable_genes, n_batches, n_fixed_genes, need_batch=n_batches > 1 and (input_batch_id or enable_batch_bias), device=device)
 
         self.n_topics: int = n_topics
         self.n_trainable_proteins: int = n_trainable_proteins
@@ -191,7 +192,7 @@ class scETM(BaseCellModel):
             assert rho_fixed_emb.shape[1] == self.n_fixed_genes + self.n_trainable_genes
             self.rho_fixed_emb = torch.FloatTensor(rho_fixed_emb).to(device)
 
-        self.alpha: nn.Parameter = nn.Parameter(torch.randn(self.n_topics, self.trainable_gene_emb_dim + (self.rho_fixed_emb.shape[0] if self.rho_fixed_emb is not None else 0)))
+        self.alpha: nn.Parameter = nn.Parameter(torch.randn(self.n_topics * 2, self.trainable_gene_emb_dim + (self.rho_fixed_emb.shape[0] if self.rho_fixed_emb is not None else 0)))
         self._init_batch_and_global_biases()
 
         self.to(device)
@@ -218,7 +219,7 @@ class scETM(BaseCellModel):
         if self.n_fixed_genes > 0:
             self.q_delta_gene[0] = InputPartlyTrainableLinear(self.n_fixed_genes, self.hidden_sizes[0], trainable_dim_genes)
         else:
-            self.q_delta_gene[0] = nn.Linear(trainable_dim, self.hidden_sizes[0])
+            self.q_delta_gene[0] = nn.Linear(trainable_dim_genes, self.hidden_sizes[0])
         self.q_delta_protein[0] = nn.Linear(trainable_dim_proteins, self.hidden_sizes[0])
 
     def _init_rho_trainable_emb(self) -> None:
@@ -282,30 +283,46 @@ class scETM(BaseCellModel):
                 batch.
         """
 
-        cells, library_size = data_dict['cells'], data_dict['library_size']
-        cells_gene, cells_protein = cells[,: self.n_trainable_genes + self.n_fixed_genes], cells[, self.n_trainable_genes + self.n_fixed_genes:]
-        library_size_gene = library_size[,: self.n_trainable_genes + self.n_fixed_genes], library_size[, self.n_trainable_genes + self.n_fixed_genes:]
-        normed_cells = cells / library_size
-        input_cells = normed_cells if self.norm_cells else cells
+        cells_gene, library_size_gene = data_dict['cells_gene'], data_dict['library_size_gene']
+        cells_protein, library_size_protein = data_dict['cells_protein'], data_dict['library_size_protein']
+        normed_cells_gene = cells_gene / library_size_gene
+        normed_cells_protein = cells_protein / library_size_protein
+
+        cells = torch.cat([cells_gene, cells_protein], dim=1)
+        normed_cells = torch.cat([normed_cells_gene, normed_cells_protein], dim=1)
+
+        input_cells_gene = normed_cells_gene if self.norm_cells else cells_gene
+        input_cells_protein = normed_cells_protein if self.norm_cells else cells_protein
+        # print(input_cells_gene, input_cells_protein)
         if self.input_batch_id:
-            input_cells = torch.cat((input_cells, self._get_batch_indices_oh(data_dict)), dim=1)
+            input_cells_gene = torch.cat((input_cells_gene, self._get_batch_indices_oh(data_dict)), dim=1)
+            input_cells_protein = torch.cat((input_cells_protein, self._get_batch_indices_oh(data_dict)), dim=1)
         
-        q_delta_gene = self.q_delta_gene(input_cells)
+        q_delta_gene = self.q_delta_gene(input_cells_gene)
         mu_q_delta_gene = self.mu_q_delta_gene(q_delta_gene)
         logsigma_q_delta_gene = self.logsigma_q_delta_gene(q_delta_gene).clamp(self.min_logsigma, self.max_logsigma)
-        q_delta_gene = Independent(Normal(
-            loc=mu_q_delta_gene,
-            scale=logsigma_q_delta_gene.exp()
+
+        # print(input_cells_protein)
+        q_delta_protein = self.q_delta_protein(input_cells_protein)
+        # print(q_delta_protein)
+        mu_q_delta_protein = self.mu_q_delta_protein(q_delta_protein)
+        # print(mu_q_delta_protein)
+        logsigma_q_delta_protein = self.logsigma_q_delta_protein(q_delta_protein).clamp(self.min_logsigma, self.max_logsigma)
+        # print(logsigma_q_delta_protein)
+
+        mu_q_delta = torch.cat([mu_q_delta_gene, mu_q_delta_protein], dim=1)
+        logsigma_q_delta = torch.cat([logsigma_q_delta_gene, logsigma_q_delta_protein], dim=1)
+
+        q_delta = Independent(Normal(
+            loc=mu_q_delta,
+            scale=logsigma_q_delta.exp()
         ), 1)
-
-        delta_gene = q_delta_gene.rsample()
-        theta_gene = F.softmax(delta, dim=-1)  # [batch_size, n_topics]
-
-        q_delta_protein = self.q_delta_protein()
+        delta = q_delta.rsample()
+        theta = F.softmax(delta, dim=-1)  # [batch_size, n_topics * 2]
 
         if not self.training:
-            theta = F.softmax(mu_q_delta_gene, dim=-1)
-            fwd_dict = dict(theta=theta, delta=mu_q_delta_gene)
+            theta = F.softmax(mu_q_delta, dim=-1)
+            fwd_dict = dict(theta=theta, delta=mu_q_delta)
             if 'decode' in hyper_param_dict and hyper_param_dict['decode']:
                 recon_log = self.decode(theta, data_dict.get('batch_indices', None))
                 fwd_dict['recon_log'] = recon_log
@@ -315,7 +332,7 @@ class scETM(BaseCellModel):
         recon_log = self.decode(theta, data_dict.get('batch_indices', None))
 
         nll = (-recon_log * normed_cells if self.normed_loss else cells).sum(-1).mean()
-        kl_delta = get_kl(mu_q_delta_gene, logsigma_q_delta_gene).mean()
+        kl_delta = get_kl(mu_q_delta, logsigma_q_delta).mean()
         loss = nll + hyper_param_dict['kl_weight'] * kl_delta
         record = dict(loss=loss, nll=nll, kl_delta=kl_delta)
 
@@ -329,8 +346,99 @@ class scETM(BaseCellModel):
         
         return loss, fwd_dict, record
 
+    def get_cell_embeddings_and_nll(self,
+        adata_gene: anndata.AnnData,
+        adata_protein: anndata.AnnData,
+        batch_size: int = 2000,
+        emb_names: Union[str, Iterable[str], None] = None,
+        batch_col: str = 'batch_indices',
+        inplace: bool = True
+    ) -> Union[Union[None, float], Tuple[Mapping[str, np.ndarray], Union[None, float]]]:
+        """Calculates cell embeddings and nll for the given dataset.
+
+        If inplace, cell embeddings will be stored to adata.obsm. You can
+        reference them by the keys in self.emb_names.
+
+        Args:
+            adata_gene: the test gene dataset. adata_gene.n_vars must equal to #genes of this
+                model.
+            adata_protein: the test protein dataset. adata_protein.n_vars must equal to
+                #proteins of this model.
+            batch_size: batch size for test data input.
+            emb_names: names of the embeddings to be returned or stored to
+                adata_gene.obsm and adata_protein.obsm. Must be a subset of self.emb_names.
+                If None, default to self.emb_names.
+            batch_col: a key in adata_gene.obs & adata_protein.obs to the batch column.
+                Only used when self.need_batch is True.
+            inplace: whether embeddings will be stored to adata or returned.
+
+        Returns:
+            If inplace, only the test nll. Otherwise, return the cell 
+            embeddings as a dict and also the test nll.
+        """
+
+        assert adata_gene.n_vars == self.n_fixed_genes + self.n_trainable_genes
+        nlls = []
+        if self.need_batch and adata_gene.obs[batch_col].nunique() != self.n_batches:
+            _logger.warning(
+                f'adata.obs[{batch_col}] contains {adata_gene.obs[batch_col].nunique()} batches, '
+                f'while self.n_batches == {self.n_batches}.'
+            )
+            if self.need_batch:
+                _logger.warning('Disable decoding. You will not get reconstructed cell-gene matrix or nll.')
+                nlls = None
+        if emb_names is None:
+            emb_names = self.emb_names
+        self.eval()
+        if isinstance(emb_names, str):
+            emb_names = [emb_names]
+
+        embs = {name: [] for name in emb_names}
+        hyper_param_dict = dict(decode=nlls is not None)
+
+        def store_emb_and_nll(data_dict, fwd_dict):
+            for name in emb_names:
+                embs[name].append(fwd_dict[name].detach().cpu())
+            if nlls is not None:
+                nlls.append(fwd_dict['nll'].detach().item())
+
+        self._apply_to(adata_gene, adata_protein, batch_col, batch_size, hyper_param_dict, callback=store_emb_and_nll)
+
+        embs = {name: torch.cat(embs[name], dim=0).numpy() for name in emb_names}
+        if nlls is not None:
+            nll = sum(nlls) / adata_gene.n_obs
+        else:
+            nll = None
+
+        if inplace:
+            adata_gene.obsm.update(embs)
+            adata_protein.obsm.update(embs)
+            return nll
+        else:
+            return embs, nll
+
+    def _apply_to(self,
+        adata_gene: anndata.AnnData,
+        adata_protein: anndata.AnnData,
+        batch_col: str = 'batch_indices',
+        batch_size: int = 2000,
+        hyper_param_dict: Union[dict, None] = None,
+        callback: Union[Callable, None] = None
+    ) -> None:
+        """Docstring (TODO)
+        """
+
+        sampler = CellSamplerCITE(adata_gene, adata_protein, batch_size=batch_size, sample_batch_id=self.need_batch, n_epochs=1, batch_col=batch_col, shuffle=False)
+        self.eval()
+        for data_dict in sampler:
+            data_dict = {k: v.to(self.device) for k, v in data_dict.items()}
+            fwd_dict = self(data_dict, hyper_param_dict=hyper_param_dict)
+            if callback is not None:
+                callback(data_dict, fwd_dict)
+
     def get_all_embeddings_and_nll(self,
-        adata: anndata.AnnData,
+        adata_gene: anndata.AnnData,
+        adata_protein: anndata.AnnData,
         batch_size: int = 2000,
         emb_names: Union[str, Iterable[str], None] = None,
         batch_col: str = 'batch_indices',
@@ -345,8 +453,10 @@ class scETM(BaseCellModel):
         stored to adata.uns with the key "alpha".
 
         Args:
-            adata: the test dataset. adata.n_vars must equal to #genes of this
+            adata_gene: the gene test dataset. adata_gene.n_vars must equal to #genes of this
                 model.
+            adata_protein: the protein test dataset. adata_protein.n_vars must equal to
+                #proteins of this model.
             batch_size: batch size for test data input.
             emb_names: names of the embeddings to be returned or stored to
                 adata.obsm. Must be a subset of self.emb_names. If None,
@@ -361,12 +471,14 @@ class scETM(BaseCellModel):
             topic embeddings as a dict and also the test nll.
         """
 
-        result = super().get_cell_embeddings_and_nll(adata, batch_size=batch_size, emb_names=emb_names, batch_col=batch_col, inplace=inplace)
+        result = self.get_cell_embeddings_and_nll(adata_gene, adata_protein, batch_size=batch_size, emb_names=emb_names, batch_col=batch_col, inplace=inplace)
         if writer is not None:
             self.write_topic_gene_embeddings_to_tensorboard(writer, adata.var_names)
         if inplace:
-            adata.varm['rho'] = self.rho.T.detach().cpu().numpy()
-            adata.uns['alpha'] = self.alpha.detach().cpu().numpy()
+            adata_gene.varm['rho'] = self.rho.T.detach().cpu().numpy()
+            adata_gene.uns['alpha'] = self.alpha.detach().cpu().numpy()
+            adata_protein.varm['rho'] = adata_gene.varm['rho']
+            adata_protein.uns['alpha'] = adata_gene.uns['alpha']
             return result
         else:
             result_dict, nll = result

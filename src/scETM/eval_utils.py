@@ -15,7 +15,7 @@ from typing import Mapping, Sequence, Tuple, Iterable, Union
 from scipy.sparse import issparse
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_samples
 from sklearn.neighbors import NearestNeighbors
-from scETM.logging_utils import log_arguments
+from logging_utils import log_arguments
 import psutil
 
 _cpu_count: Union[None, int] = psutil.cpu_count(logical=False)
