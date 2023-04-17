@@ -1,0 +1,34 @@
+files:
+  rna:
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0902_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0915_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0917_rna.h5ad
+#     - /arc/project/st-jiaruid-1/yinian/pbmc/CV0926_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0929_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0939_rna.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0940_rna.h5ad
+  protein: 
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0902_protein.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0915_protein.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0917_protein.h5ad
+#     - /arc/project/st-jiaruid-1/yinian/pbmc/CV0926_protein.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0929_protein.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0939_protein.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0940_protein.h5ad
+  combined:
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0902_combined.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0915_combined.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0917_combined.h5ad
+#     - /arc/project/st-jiaruid-1/yinian/pbmc/CV0926_combined.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0929_combined.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0939_combined.h5ad
+    - /arc/project/st-jiaruid-1/yinian/pbmc/CV0940_combined.h5ad
+  gene_indices: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/scripts/gene_indices_covid2.pkl
+model_params:
+  n_epochs: 12000
+  eval_every: 3000
+  cell_type_col: full_clustering
+  day: 4
+  donor: covid_healthy
+  rna_n_vars: 24737
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/results/

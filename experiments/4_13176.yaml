@@ -1,0 +1,16 @@
+files:
+  rna:
+    - /arc/project/st-jiaruid-1/yinian/pbmc/4_13176_raw_rna.h5ad
+  protein: 
+    - /arc/project/st-jiaruid-1/yinian/pbmc/4_13176_raw_protein.h5ad
+  combined:
+    - /arc/project/st-jiaruid-1/yinian/pbmc/4_13176_raw_combined.h5ad
+  gene_indices: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/scripts/gene_indices_2.pkl
+model_params:
+  n_epochs: 12000
+  eval_every: 3000
+  cell_type_col: cell_type
+  day: 4
+  donor: 13176
+  rna_n_vars: 22085
+ckpt_dir: /scratch/st-jiaruid-1/yinian/my_jupyter/scETM/results/
