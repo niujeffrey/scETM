@@ -116,7 +116,7 @@ class UnsupervisedTrainerCITE:
         self.seed = seed
 
         self.train_instance_name = train_instance_name
-        if restore_epoch > 0 and type(self) == UnsupervisedTrainer:
+        if restore_epoch > 0 and type(self) == UnsupervisedTrainerCITE:
             self.ckpt_dir = ckpt_dir
             self.load_ckpt(restore_epoch, self.ckpt_dir)
         elif ckpt_dir is not None and restore_epoch == 0:
