@@ -1,3 +1,56 @@
+# MultiETM: CPSC536R course project
+
+MultiETM is an extension of scETM to multimodal data.
+In this respository, we have included the MultiETM model and experiments on CITE-seq data.
+The experiments on the naive concat-scETM model are also included.
+
+The experiments are configured in the `experiments` directory.
+They are YAML files with the following format:
+
+```yaml
+files:
+  rna:
+    - path to h5ad file for batch 1 RNA data
+    - path to h5ad file for batch 2 RNA data
+    - ...
+  protein:
+    - path to h5ad file for batch 1 protein data
+    - path to h5ad file for batch 2 protein data
+    - ...
+  combined:
+    - path to h5ad file for batch 1 concatenated RNA and protein data
+    - path to h5ad file for batch 2 concatenated RNA and protein data
+    - ...
+  gene_indices: Python pickle file containing array of genes to zero out during imputation. Only needed for imputation experiments.
+model_params:
+  n_epochs: number of epochs to train
+  eval_every: number of epochs at which the model should be evaluated
+  cell_type_col: name of column in AnnData obs that contains the cell type annotation. None if there are no annotations
+  day: for my use only, can be anything
+  donor: for my use only, can be anything
+  rna_n_vars: number of genes in the RNA data
+ckpt_dir: directory to store all training information
+```
+
+All the notebooks needed to run the different models and experiments are located in the `notebooks` directory.
+They are:
+
+* `base-scETM.ipynb`: trains and evaluates the scETM model on only RNA data
+* `concat-scETM.ipynb`: trains and evaluates concat-scETM (which concatenates the RNA and protein data and uses scETM as-is)
+* `MultiETM.ipynb`: trains and evaluates the MultiETM model
+* `Gene Imputation.ipynb`: experiment to train a model and impute zeroed out genes
+* `Scanpy Analysis.ipynb` experiment to evaluate ARI and NMI clustering metrics using PCA on only RNA and on concatenated RNA and protein data.
+* `Muon WNN Analysis.ipynb`: experiment to evaluate ARI and NMI clustering metrics using weighted nearest neighbours as implemented in Muon.
+* `Pathway Analysis.ipynb`: using the saved linear decoder matrices, find biological pathways associated with each topic.
+
+The h5ad files used for the experiments are available upon request because I do not know the legality/ethics of uploading the derivative h5ad data from other experiments (anonymized data, attribution, etc.).
+The datasets used for experiments were:
+
+* https://www.kaggle.com/competitions/open-problems-multimodal/data
+* https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-10026
+* https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-10129 (this one went unused in the project)
+
+
 # scETM: single-cell Embedded Topic Model
 A generative topic model that facilitates integrative analysis of large-scale single-cell RNA sequencing data.
 
